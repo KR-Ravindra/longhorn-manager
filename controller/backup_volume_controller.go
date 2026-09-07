@@ -310,8 +310,13 @@ func (bvc *BackupVolumeController) reconcile(backupVolumeName string) (err error
 					}
 				}
 			}
+		}
+		// Skip the Backup CR which is being deleted (backup volume is being deleted and S3 cleanup is slow)
+		// so we don't get errors when volume.cfg is missing from backupstore
+		if b.Status.State == longhorn.BackupStateDeleting {
 			continue
 		}
+
 		clustersSet.Insert(b.Name)
 	}
 
@@ -494,7 +499,6 @@ func (bvc *BackupVolumeController) isLastBackupUpdateSafeToSkip(clusterBackups m
 	lastCreatedAndCompletedBackupName := ""
 	for backupName, backup := range clusterBackups {
 		if !backupStoreBackups.Has(backupName) || backup.Status.State != longhorn.BackupStateCompleted {
-			continue
 		}
 
 		if bv.Status.LastBackupAt == "" {
