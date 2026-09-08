@@ -186,3 +186,143 @@ func TestSyncShareManagerCurrentImage(t *testing.T) {
 		t.Fatalf("expected current image to be cleared when pod is nil, got %q", sm.Status.CurrentImage)
 	}
 }
+
+func TestShareManagerController_getAffinityFromStorageClass(t *testing.T) {
+	type args struct {
+		sc *storagev1.StorageClass
+	}
+	tests := []struct {
+		name       string
+		args       args
+		wantAffinity *corev1.Affinity
+	}{
+		{
+			name: "no allowed topologies",
+			args: args{
+				sc: &storagev1.StorageClass{},
+			},
+			wantAffinity: nil,
+		},
+		{
+			name: "single allowed topology with zone label",
+			args: args{
+				sc: &storagev1.StorageClass{
+					AllowedTopologies: []corev1.TopologySelectorTerm{
+						{
+							MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{
+								{
+									Key:   corev1.LabelTopologyZone,
+									Values: []string{"zone-1"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantAffinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      corev1.LabelTopologyZone,
+										Operator: corev1.NodeSelectorOpIn,
+										Values:   []string{"zone-1"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "multiple allowed topologies with arbiter zone",
+			args: args{
+				sc: &storagev1.StorageClass{
+					AllowedTopologies: []corev1.TopologySelectorTerm{
+						{
+							MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{
+								{
+									Key:   corev1.LabelTopologyZone,
+									Values: []string{"zone-a", "zone-b", "zone-arbiter"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantAffinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      corev1.LabelTopologyZone,
+										Operator: corev1.NodeSelectorOpNotIn,
+										Values:   []string{"zone-b", "zone-arbiter"},
+									},
+									{
+										Key:      corev1.LabelTopologyZone,
+										Operator: corev1.NodeSelectorOpIn,
+										Values:   []string{"zone-a", "zone-b", "zone-arbiter"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "multiple zones should exclude all but first zone",
+			args: args{
+				sc: &storagev1.StorageClass{
+					AllowedTopologies: []corev1.TopologySelectorTerm{
+						{
+							MatchLabelExpressions: []corev1.TopologySelectorLabelRequirement{
+								{
+									Key:   corev1.LabelTopologyZone,
+									Values: []string{"zone-x", "zone-y", "zone-z"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantAffinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      corev1.LabelTopologyZone,
+										Operator: corev1.NodeSelectorOpNotIn,
+										Values:   []string{"zone-y", "zone-z"},
+									},
+									{
+										Key:      corev1.LabelTopologyZone,
+										Operator: corev1.NodeSelectorOpIn,
+										Values:   []string{"zone-x", "zone-y", "zone-z"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &ShareManagerController{}
+			got := c.getAffinityFromStorageClass(tt.args.sc)
+			if !reflect.DeepEqual(got, tt.wantAffinity) {
+				t.Errorf("getAffinityFromStorageClass() = %v, wantAffinity %v", got, tt.wantAffinity)
+			}
+		})
+	}
+}

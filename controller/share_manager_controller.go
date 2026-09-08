@@ -1019,6 +1019,46 @@ func (c *ShareManagerController) getAffinityFromStorageClass(sc *storagev1.Stora
 		return nil
 	}
 
+	// If multiple zones are allowed (indicated by multiple values), add affinity to exclude arbiter zones
+	// This prevents share-manager pods from being scheduled on nodes that only serve as arbiters,
+	// which would result in slow data paths for RWX volumes
+	if len(matchLabelExpressions) > 0 && len(matchLabelExpressions[0].Values) > 1 {
+		matchedZone, hasMultipleZones := matchLabelExpressions[0].Values[0], len(matchLabelExpressions[0].Values) > 1
+
+		// For multiple zones, exclude any zone that isn't the first matched zone
+		// This ensures share-manager pods stay within replica zones (not arbiters)
+		if hasMultipleZones {
+			antiAffinity := &corev1.NodeSelectorRequirement{
+				Key:      corev1.LabelTopologyZone,
+				Operator: corev1.NodeSelectorOpNotIn,
+				Values:   matchLabelExpressions[0].Values[1:], // Exclude all zones except the first one
+			}
+
+			if len(matchLabelExpressions) == 1 {
+				// Single match expression, prepend anti-affinity
+				matchLabelExpressions = []corev1.NodeSelectorRequirement{*antiAffinity, matchLabelExpressions[0]}
+			} else {
+				// First expression is a zone requirement, add anti-affinity before other expressions
+				matchLabelExpressions = []corev1.NodeSelectorRequirement{*antiAffinity, matchLabelExpressions[0]}
+			}
+		} else {
+			// Single zone allowed, ensure it matches topology.kubernetes.io/zone
+			if matchLabelExpressions[0].Key != corev1.LabelTopologyZone {
+				// Add anti-affinity to exclude all other zones
+				antiAffinity := &corev1.NodeSelectorRequirement{
+					Key:      corev1.LabelTopologyZone,
+					Operator: corev1.NodeSelectorOpNotIn,
+					Values:   []string{matchedZone},
+				}
+				if len(matchLabelExpressions) == 1 {
+					matchLabelExpressions = []corev1.NodeSelectorRequirement{*antiAffinity, matchLabelExpressions[0]}
+				} else {
+					matchLabelExpressions = []corev1.NodeSelectorRequirement{*antiAffinity, matchLabelExpressions[0]}
+				}
+			}
+		}
+	}
+
 	return &corev1.Affinity{
 		NodeAffinity: &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
