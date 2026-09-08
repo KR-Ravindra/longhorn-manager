@@ -173,6 +173,12 @@ func (v *volumeValidator) Create(request *admission.Request, newObj runtime.Obje
 		return err
 	}
 
+	if types.IsDataEngineV2(volume.Spec.DataEngine) {
+		if err := v.validateV2EngineAvailability(); err != nil {
+			return err
+		}
+	}
+
 	if !volume.Spec.Standby {
 		if types.IsDataEngineV1(volume.Spec.DataEngine) &&
 			volume.Spec.Frontend != longhorn.VolumeFrontendBlockDev &&
@@ -726,6 +732,61 @@ func (v *volumeValidator) hasLocalReplicaOnSameNodeAsStrictLocalVolume(volume *l
 	return false, fmt.Errorf("moving a %v volume %v to another node is not supported", longhorn.DataLocalityStrictLocal, volume.Name)
 }
 
+func (v *volumeValidator) validateV2EngineAvailability() error {
+	nodes, err := v.ds.ListNodes()
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %v", err)
+	}
+
+	logrus.Infof("V2 validation: found %d nodes", len(nodes))
+	var availableV2Nodes int
+	for _, node := range nodes {
+		if node == nil || node.DeletionTimestamp != nil {
+			logrus.Infof("  - Skipping %s (nil or being deleted)", node.Name)
+			continue
+		}
+
+		nodeReadyCondition := types.GetCondition(node.Status.Conditions, longhorn.NodeConditionTypeReady)
+		nodeSchedulableCondition := types.GetCondition(node.Status.Conditions, longhorn.NodeConditionTypeSchedulable)
+
+		if nodeReadyCondition.Status != longhorn.ConditionStatusTrue {
+			logrus.Infof("  - Skipping %s (not ready: %v)", node.Name, nodeReadyCondition.Status)
+			continue
+		}
+		if nodeSchedulableCondition.Status != longhorn.ConditionStatusTrue {
+			logrus.Infof("  - Skipping %s (not schedulable: %v)", node.Name, nodeSchedulableCondition.Status)
+			continue
+		}
+		if !node.Spec.AllowScheduling {
+			logrus.Infof("  - Skipping %s (not allowed scheduling)", node.Name)
+			continue
+		}
+
+		// Exclude nodes where v2 data engine is disabled.
+		kubeNode, err := v.ds.GetKubernetesNodeRO(node.Name)
+		if err != nil {
+			logrus.WithField("node", node.Name).WithError(err).Warn("Skipping node because failed to get corresponding kubernetes node")
+			continue
+		}
+		logrus.Infof("  - Checking %s: labels=%v, disable-v2-label=%v", node.Name, kubeNode.Labels, kubeNode.Labels[types.NodeDisableV2DataEngineLabelKey])
+		val, ok := kubeNode.Labels[types.NodeDisableV2DataEngineLabelKey]
+		if ok && val == types.NodeDisableV2DataEngineLabelKeyTrue {
+			logrus.Infof("  - Skipping %s (v2 disabled by label)", node.Name)
+			continue
+		}
+
+		logrus.Infof("  - Node %s is available for v2", node.Name)
+		availableV2Nodes++
+	}
+
+	if availableV2Nodes == 0 {
+		logrus.Warnf("No available node for v2 data engine (only %d nodes checked)", len(nodes))
+		return fmt.Errorf("no available node for v2 data engine")
+	}
+
+	return nil
+}
+
 func validateDataLocalityUpdate(oldVolume *longhorn.Volume, newVolume *longhorn.Volume) error {
 	if err := types.ValidateDataLocality(newVolume.Spec.DataLocality); err != nil {
 		return err
@@ -814,8 +875,10 @@ func validateSnapshotMaxSize(size, snapshotMaxSize int64) error {
 }
 
 func (v *volumeValidator) validateBackupTarget(oldBackupTarget, newBackupTarget string) error {
-	if newBackupTarget == "" {
-		return fmt.Errorf("backup target name cannot be empty when creating a volume or updating from an existing backup target")
+	// For Create: empty BackupTargetName is allowed (no backup target configured yet)
+	// For Update: BackupTargetName must be specified (can't remove or change backup target)
+	if oldBackupTarget != "" && newBackupTarget == "" {
+		return fmt.Errorf("backup target name cannot be empty when updating from an existing backup target %v", oldBackupTarget)
 	}
 	if oldBackupTarget == newBackupTarget {
 		return nil

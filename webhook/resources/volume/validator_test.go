@@ -1,7 +1,9 @@
 package volume
 
 import (
+	"context"
 	"testing"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -296,6 +298,258 @@ func TestValidateLinkedCloneSize(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+		})
+	}
+}
+
+func createTestVolume(name string, dataEngine longhorn.DataEngineType, engineImage string) *longhorn.Volume {
+	vol := &longhorn.Volume{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: longhorn.VolumeSpec{
+			Size:                   1 << 30, // 1 GiB
+			DataEngine:             dataEngine,
+			DataLocality:           longhorn.DataLocalityDisabled,
+			AccessMode:             longhorn.AccessModeReadWriteOnce,
+			NumberOfReplicas:       2,
+			ReplicaAutoBalance:     longhorn.ReplicaAutoBalanceIgnored,
+			ReplicaSoftAntiAffinity: longhorn.ReplicaSoftAntiAffinityDefault,
+			ReplicaZoneSoftAntiAffinity: longhorn.ReplicaZoneSoftAntiAffinityDefault,
+			ReplicaDiskSoftAntiAffinity: longhorn.ReplicaDiskSoftAntiAffinityDefault,
+			OfflineRebuilding:      longhorn.VolumeOfflineRebuildingIgnored,
+			BackupBlockSize:        types.BackupBlockSize2Mi,
+			SnapshotMaxCount:       10, // valid value: 2-250
+			UnmapMarkSnapChainRemoved: func() longhorn.UnmapMarkSnapChainRemoved {
+				if types.IsDataEngineV1(dataEngine) {
+					return longhorn.UnmapMarkSnapChainRemovedIgnored
+				}
+				return longhorn.UnmapMarkSnapChainRemovedDisabled
+			}(),
+		},
+	}
+
+	vol.Spec.Frontend = longhorn.VolumeFrontendBlockDev
+	vol.Spec.Image = engineImage
+	return vol
+}
+
+func TestValidateV2DataEngineAvailability(t *testing.T) {
+	var err error
+	testCases := []struct {
+		name          string
+		dataEngine    longhorn.DataEngineType
+		nodes         []*longhorn.Node
+		wantErr       bool
+		errSubstring  string
+		createImage   string
+	}{
+		{
+			name:        "v1 volume should pass regardless of node v2 restrictions",
+			dataEngine:  longhorn.DataEngineTypeV1,
+			nodes: []*longhorn.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Spec: longhorn.NodeSpec{
+						AllowScheduling: true,
+					},
+					Status: longhorn.NodeStatus{
+						Conditions: []longhorn.Condition{
+							{
+								Type:   longhorn.NodeConditionTypeReady,
+								Status: longhorn.ConditionStatusTrue,
+							},
+							{
+								Type:   longhorn.NodeConditionTypeSchedulable,
+								Status: longhorn.ConditionStatusTrue,
+							},
+						},
+					},
+				},
+			},
+			createImage: "longhornio/longhorn-engine:v1.3.0",
+			wantErr:     false,
+		},
+		{
+			name:          "v2 volume with no nodes should be rejected",
+			dataEngine:    longhorn.DataEngineTypeV2,
+			nodes:         []*longhorn.Node{},
+			createImage:   "longhornio/longhorn-engine:v2.5.0",
+			wantErr:       true,
+			errSubstring:  "no available node for v2 data engine",
+		},
+		{
+			name: "v2 volume with one node disabled for v2 should be rejected",
+			dataEngine: longhorn.DataEngineTypeV2,
+			nodes: []*longhorn.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1", Labels: map[string]string{
+						types.NodeDisableV2DataEngineLabelKey: types.NodeDisableV2DataEngineLabelKeyTrue,
+					}},
+					Spec: longhorn.NodeSpec{
+						AllowScheduling: true,
+					},
+					Status: longhorn.NodeStatus{
+						Conditions: []longhorn.Condition{
+							{
+								Type:   longhorn.NodeConditionTypeReady,
+								Status: longhorn.ConditionStatusTrue,
+							},
+							{
+								Type:   longhorn.NodeConditionTypeSchedulable,
+								Status: longhorn.ConditionStatusTrue,
+							},
+						},
+					},
+				},
+			},
+			createImage: "longhornio/longhorn-engine:v2.5.0",
+			wantErr:     true,
+			errSubstring: "no available node for v2 data engine",
+		},
+		{
+			name: "v2 volume with one node enabled for v2 should pass",
+			dataEngine: longhorn.DataEngineTypeV2,
+			nodes: []*longhorn.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Spec: longhorn.NodeSpec{
+						AllowScheduling: true,
+					},
+					Status: longhorn.NodeStatus{
+						Conditions: []longhorn.Condition{
+							{
+								Type:   longhorn.NodeConditionTypeReady,
+								Status: longhorn.ConditionStatusTrue,
+							},
+							{
+								Type:   longhorn.NodeConditionTypeSchedulable,
+								Status: longhorn.ConditionStatusTrue,
+							},
+						},
+					},
+				},
+			},
+			createImage: "longhornio/longhorn-engine:v2.5.0",
+			wantErr:     false,
+		},
+		{
+			name: "v2 volume with multiple nodes all enabled for v2 should pass",
+			dataEngine: longhorn.DataEngineTypeV2,
+			nodes: []*longhorn.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Spec: longhorn.NodeSpec{
+						AllowScheduling: true,
+					},
+					Status: longhorn.NodeStatus{
+						Conditions: []longhorn.Condition{
+							{
+								Type:   longhorn.NodeConditionTypeReady,
+								Status: longhorn.ConditionStatusTrue,
+							},
+							{
+								Type:   longhorn.NodeConditionTypeSchedulable,
+								Status: longhorn.ConditionStatusTrue,
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node2"},
+					Spec: longhorn.NodeSpec{
+						AllowScheduling: true,
+					},
+					Status: longhorn.NodeStatus{
+						Conditions: []longhorn.Condition{
+							{
+								Type:   longhorn.NodeConditionTypeReady,
+								Status: longhorn.ConditionStatusTrue,
+							},
+							{
+								Type:   longhorn.NodeConditionTypeSchedulable,
+								Status: longhorn.ConditionStatusTrue,
+							},
+						},
+					},
+				},
+			},
+			createImage: "longhornio/longhorn-engine:v2.5.0",
+			wantErr:     false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Debug: check the test cases
+			t.Logf("Test case: %s, dataEngine: %v, nodes: %d", tc.name, tc.dataEngine, len(tc.nodes))
+			
+			kubeClient := fake.NewSimpleClientset()
+			lhClient := lhfake.NewSimpleClientset()
+			extensionsClient := apiextensionsfake.NewSimpleClientset()
+			informerFactories := util.NewInformerFactories(linkedCloneTestNamespace, kubeClient, lhClient, 0)
+			ds := datastore.NewDataStoreForGlobal(linkedCloneTestNamespace, lhClient, kubeClient, extensionsClient, informerFactories)
+			
+			// Add nodes to datastore informers
+			for _, node := range tc.nodes {
+				// Set namespace on Longhorn node to match the datastore namespace
+				node.ObjectMeta.Namespace = linkedCloneTestNamespace
+				// Add to Longhorn nodes informer via fake client (so informer will pick it up)
+				lhNode := node.DeepCopy()
+				_, err := lhClient.LonghornV1beta2().Nodes(linkedCloneTestNamespace).Create(context.TODO(), lhNode, metav1.CreateOptions{})
+				require.NoError(t, err)
+				// Add to Kubernetes nodes informer (and fake client)
+				kubeNodeLabels := make(map[string]string)
+				for k, v := range node.Labels {
+					kubeNodeLabels[k] = v
+				}
+				kubeNode := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:    node.Name,
+						Labels:  kubeNodeLabels,
+					},
+				}
+				_, err = kubeClient.CoreV1().Nodes().Create(context.TODO(), kubeNode, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, ds.KubeNodeInformer.GetStore().Add(kubeNode))
+			
+			// Debug: check nodes added to informers
+			t.Logf("Nodes in LH informer store: %d", len(ds.NodeInformer.GetStore().List()))
+			t.Logf("Nodes in Kube informer store: %d", len(ds.KubeNodeInformer.GetStore().List()))
+			}
+			
+			// Add settings
+			v1Setting := &longhorn.Setting{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: string(types.SettingNameV1DataEngine),
+				},
+				Value: "true",
+			}
+			require.NoError(t, ds.SettingInformer.GetStore().Add(v1Setting))
+			
+			// Create test volume
+			createTestVolume("test-volume", tc.dataEngine, tc.createImage)
+			
+			// Start informer factories
+			stopCh := make(chan struct{})
+			defer close(stopCh)
+			go informerFactories.Start(stopCh)
+			
+			// Wait for informers to sync
+			if !ds.Sync(stopCh) {
+				t.Fatal("failed to sync informers")
+			}
+			
+			// Run validation
+			v := &volumeValidator{ds: ds}
+			err = v.validateV2EngineAvailability()
+			
+			if tc.wantErr {
+				require.Error(t, err)
+				if tc.errSubstring != "" {
+					assert.Contains(t, err.Error(), tc.errSubstring)
+				}
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }
