@@ -90,6 +90,7 @@ type Server struct {
 	// metadataDir is the base path for persisting engine frontend records
 	// (e.g. /var/lib/longhorn). If empty, persistence is disabled.
 	metadataDir string
+	lastRestartTime atomic.Int64
 
 	newServiceClient ServiceClientFactory
 }
@@ -231,7 +232,29 @@ func (s *Server) tryEnsureSPDKTgtConnectionHealthy() error {
 		return errors.Wrap(err, "failed to check spdk_tgt is running")
 	}
 	if !running {
-		return errors.New("spdk_tgt is not running")
+		// If spdk_tgt is not running, attempt to restart it after a crash.
+		// Check if we haven't restarted recently to avoid infinite restart loops.
+		lastRestart := s.lastRestartTime.Load()
+		now := time.Now().Unix()
+		if lastRestart == 0 || (now - lastRestart) > 300 { // Allow restart once every 5 minutes
+			logrus.Warnf("spdk_tgt crashed, attempting restart")
+			if err := util.StartSPDKTgtDaemon(); err != nil {
+				return errors.Wrap(err, "failed to restart spdk_tgt after crash")
+			}
+			// Clear the state and record the restart time
+			s.diskMap = make(map[string]*Disk)
+			s.replicaMap = make(map[string]*Replica)
+			s.engineMap = make(map[string]*Engine)
+			s.engineFrontendMap = make(map[string]*EngineFrontend)
+			s.shardMap = make(map[string]*Shard)
+			s.shardGroupMap = make(map[string]*ShardGroup)
+			s.backingImageMap = make(map[string]*BackingImage)
+			s.lastRestartTime.Store(now)
+			logrus.Info("spdk_tgt restarted successfully, waiting for disks to be recreated")
+			// Return nil to indicate we've attempted to fix the issue
+			return nil
+		}
+		return errors.New("spdk_tgt is not running and cannot be restarted")
 	}
 
 	logrus.Info("spdk gRPC server: reconnecting to spdk_tgt")
