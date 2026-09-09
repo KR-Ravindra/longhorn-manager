@@ -379,7 +379,7 @@ func (kc *KubernetesPodController) cleanupForceDeletedPodResources(pod *corev1.P
 	for _, volumeAttachment := range volumeAttachments {
 		shouldDeleteVolumeAttachment, err := kc.shouldDeleteVolumeAttachmentForForceDeletedPod(pod, volumeAttachment)
 		if err != nil {
-			logrus.WithError(err).Errorf("%v: failed to check if volume attachment %q for force-deleted pod %q should be deleted", controllerAgentName, volumeAttachment.Name, pod.Name)
+			kc.logger.WithError(err).Errorf("%v: failed to check if volume attachment %q for force-deleted pod %q should be deleted", controllerAgentName, volumeAttachment.Name, pod.Name)
 			continue
 		}
 
@@ -462,7 +462,7 @@ func (kc *KubernetesPodController) getPodWithConflictedAttachment(pods []*corev1
 
 		events, err := kc.ds.GetResourceEventList("Pod", pod.Name, pod.Namespace)
 		if err != nil {
-			logrus.WithError(err).Warnf("%v: failed to get events for pod %v", controllerAgentName, pod.Name)
+			kc.logger.WithError(err).Warnf("%v: failed to get events for pod %v", controllerAgentName, pod.Name)
 			continue
 		}
 
@@ -475,7 +475,7 @@ func (kc *KubernetesPodController) getPodWithConflictedAttachment(pods []*corev1
 				return pod
 			}
 
-			logrus.Debugf("%s: pod %v has Multi-Attach error, but not caused by pod %v, skipping cleanup",
+			kc.logger.Debugf("%s: pod %v has Multi-Attach error, but not caused by pod %v, skipping cleanup",
 				controllerAgentName, pod.Name, conflictingPod.Name)
 		}
 	}
